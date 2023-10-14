@@ -108,6 +108,30 @@ struct PSXExeHeader<'a> {
     region: &'a [u8],
 }
 
+impl PSXExeHeader<'_> {
+    /// Writes out a PSX EXE header to `stream`, which must support Seek and
+    /// therefore probably must be a file. Note that this function deliberately
+    /// writes a sparse file and won't work on systems that do not support
+    /// that. However, I am not aware of any such systems.
+    fn write<T: Write + Seek>(
+        &self,
+        stream: &mut T,
+    ) -> Result<(), anyhow::Error> {
+        let startpoint = stream.stream_position()?;
+        stream.write_all(PSXMAGIC)?;
+        stream.write_u32::<LittleEndian>(self.pc)?;
+        stream.write_u32::<LittleEndian>(self.gp)?;
+        stream.write_u32::<LittleEndian>(self.text_addr)?;
+        stream.write_u32::<LittleEndian>(self.text_size)?;
+        stream.seek(SeekFrom::Current(16))?;
+        stream.write_u32::<LittleEndian>(self.stack_start)?;
+        stream.seek(SeekFrom::Current(24))?;
+        stream.write_all(self.region)?;
+        stream.seek(SeekFrom::Start(startpoint + 2048))?;
+        Ok(())
+    }
+}
+
 fn main() -> Result<()> {
     let args = {
         let mut args = Args {
@@ -189,7 +213,7 @@ fn main() -> Result<()> {
         eprintln!("WARNING: EXE is mapped into PSX kernel memory.");
     }
 
-    //r ound up to the nearest multiple of 2048.
+    //round up to the nearest multiple of 2048.
     let padded_textsz = (loadsz + 0x7ff) & !0x7ff;
 
     //turn the region string into bytes
@@ -197,7 +221,8 @@ fn main() -> Result<()> {
     //ugggh. Ugly hack to deal with the lack of support for cfg in expressions.
     #[cfg(target_family = "unix")]
     let region_bytes = region.as_bytes();
-    // NOTE: this hasn't been tested.
+    // NOTE: this hasn't been tested. It should work, in theory, but I do not
+    // guarantee it.
     #[cfg(target_family = "windows")]
     let region_bytes = {
         if !region.is_ascii() {
@@ -238,22 +263,9 @@ fn main() -> Result<()> {
         File::create(dstpth).context("could not create EXE file")?,
     );
 
-    //magic
-    dstfi.write_all(PSXMAGIC)?;
-    // actual useful data
-    dstfi.write_u32::<LittleEndian>(header.pc)?;
-    dstfi.write_u32::<LittleEndian>(header.gp)?;
-    dstfi.write_u32::<LittleEndian>(header.text_addr)?;
-    dstfi.write_u32::<LittleEndian>(header.text_size)?;
-    // writing out a sparse file means not making an in-memory buffer full of
-    // zeroes, so that's what we'll do. (not for performance reasons, I'm just
-    // lazy).
-    dstfi.seek(SeekFrom::Current(16))?;
-    dstfi.write_u32::<LittleEndian>(header.stack_start)?;
-    dstfi.seek(SeekFrom::Current(24))?;
-    dstfi.write_all(region_bytes)?;
-    dstfi.seek(SeekFrom::Start(2048))?;
+    header.write(&mut dstfi)?;
     dstfi.write_all(&exe_text)?;
     dstfi.flush()?;
+
     Ok(())
 }
