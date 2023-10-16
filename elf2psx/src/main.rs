@@ -1,11 +1,12 @@
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use byteorder::{LittleEndian, WriteBytesExt};
+use clap::Parser;
 use goblin::{
     elf::header::{EM_MIPS, EM_MIPS_RS3_LE, ET_EXEC},
     elf::program_header::{PF_W, PF_X, PT_LOAD},
     Object,
 };
-use parse_int::parse;
+use parse_int;
 #[cfg(target_family = "unix")]
 use std::os::unix::ffi::OsStrExt;
 use std::{
@@ -15,65 +16,33 @@ use std::{
     io::{BufWriter, Seek, SeekFrom, Write},
     path::PathBuf,
 };
-static USAGE: &'static str = include_str!("usage.txt");
+
 static PSXMAGIC: &'static [u8] = b"PS-X EXE\0\0\0\0\0\0\0\0";
+const HEADER_PADDING: usize = 1972;
 
+#[derive(Parser)]
+#[command(author, version, about, long_about)]
 struct Args {
-    srcfi: Option<PathBuf>,
+    /// Path to input file. Must be a 32-bit little-endian MIPS ELF binary.
+    #[arg(value_name = "INFILE")]
+    srcfi: PathBuf,
+    /// Path to output file. Will be inferred from the input file if absent.
+    #[arg(value_name = "OUTFILE")]
     dstfi: Option<PathBuf>,
+    /// Do not emit read-only segments of the input ELF in the output binary.
+    #[arg(short = 'S', long)]
     strip_ro: bool,
+    /// Sets the inital value for the MIPS stack pointer.
+    #[arg(short = 's', long, default_value_t = 0,
+        value_parser = parse_int::parse::<u32>)]
     sp: u32,
+    /// Sets the initial value for the MIPS global pointer.
+    #[arg(short = 'g', long, default_value_t = 0,
+        value_parser = parse_int::parse::<u32>)]
     gp: u32,
-    // this might seem wrong, because the region str is embedded into the
-    // binary. But OsStrings are guaranteed to be bytestrings, not unicode
-    // strings. They just may not be validly encoded.
-    //
-    // if for whaterver reason you *want* to put garbage into your region
-    // marker, who am I to disagree?
+    /// Region string to be embedded in header. Can be at most 1971 bytes.
+    #[arg(short = 'r', long)]
     region: Option<OsString>,
-}
-
-fn parse_num_for_flag(flag: char, arg: OsString) -> Result<u32> {
-    let argstring = arg.into_string().map_err(|_| {
-        anyhow!("option requires a numerical argument -- {}", flag)
-    })?;
-    parse::<u32>(&argstring)
-        .with_context(|| format!("{}: not a number", &argstring))
-}
-
-fn parse_args(args: &mut Args) -> Result<()> {
-    use lexopt::prelude::*;
-    let mut parser = lexopt::Parser::from_env();
-    while let Some(arg) = parser.next().context("error parsing arguments")? {
-        match arg {
-            Value(fi) => {
-                if fi == "" {
-                    bail!("provided filename cannot be empty string.");
-                }
-                let pth = PathBuf::from(fi);
-                if args.srcfi.is_none() {
-                    args.srcfi = Some(pth);
-                } else if args.dstfi.is_none() {
-                    args.dstfi = Some(pth);
-                } else {
-                    bail!("too many files provided.\n{}", USAGE);
-                }
-            }
-            Short('r') => {
-                args.region = Some(parser.value()?);
-            }
-            Short('S') => args.strip_ro = true,
-            Short('s') => {
-                args.sp = parse_num_for_flag('s', parser.value()?)?;
-            }
-            Short('g') => {
-                args.gp = parse_num_for_flag('g', parser.value()?)?;
-            }
-
-            _ => bail!("{}\n{}", arg.unexpected(), USAGE),
-        }
-    }
-    Ok(())
 }
 
 // The information used to construct this was taken from Martin Korth's PSX-SPX,
@@ -133,21 +102,8 @@ impl PSXExeHeader<'_> {
 }
 
 fn main() -> Result<()> {
-    let args = {
-        let mut args = Args {
-            srcfi: None,
-            dstfi: None,
-            region: None,
-            sp: 0,
-            gp: 0,
-            strip_ro: false,
-        };
-        parse_args(&mut args)?;
-        args
-    };
-    let srcpth = args
-        .srcfi
-        .ok_or_else(|| anyhow!("No input file provided"))?;
+    let args = Args::parse();
+    let srcpth = args.srcfi;
     let dstpth = if args.dstfi.is_none() {
         let mut dstpth = srcpth.clone();
         if !dstpth.set_extension("exe") {
@@ -234,7 +190,7 @@ fn main() -> Result<()> {
         region.to_str().unwrap().as_bytes()
     };
 
-    if region_bytes.len() > 1972 {
+    if region_bytes.len() > HEADER_PADDING - 1 {
         bail!("Region string too long!");
     }
 
