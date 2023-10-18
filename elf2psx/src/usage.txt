@@ -1,1 +1,0 @@
-usage: elf2psx [-S] [-s sp] [-g gp] [-r region_string] input_elf [output_exe]
